@@ -1,3 +1,4 @@
+
 """Compatibility launcher.
 
 Use this file as an alternate entrypoint:
