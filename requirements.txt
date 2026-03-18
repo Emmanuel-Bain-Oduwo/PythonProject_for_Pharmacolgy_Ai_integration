@@ -1,5 +1,5 @@
-#Core web framework 
-streamlit>=1.35.0,<2.0.0
+#Core web framework
+streamlit>=1.35.0
 fastapi>=0.111.0,<1.0.0
 uvicorn[standard]>=0.29.0,<1.0.0
 
