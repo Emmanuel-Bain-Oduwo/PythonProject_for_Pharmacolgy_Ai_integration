@@ -10,6 +10,7 @@ ENHANCEMENTS:
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import sqlite3, json, pandas as pd, numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
@@ -18,8 +19,16 @@ import os, requests
 
 from db_config import DB_PATH
 from clinical_engine import ClinicalCalculator, DoseAdjustmentEngine, SafetyChecker, Gender
-from ml_models import PatientRiskModel, DietRecommendationEngine, LabInterpreter, VisualisationEngine
-from deepseek_config import deepseek_chat_sync, deepseek_stream_sync, build_pharmacist_messages
+from ml_models import PatientRiskModel, DietRecommendationEngine, VisualisationEngine
+from lab_interpreter import LabInterpreter
+from seed_emergency_protocols import seed_emergency_protocols
+from deepseek_config import (
+    CREATOR_RESPONSE,
+    available_providers,
+    build_pharmacist_messages,
+    consensus_chat_sync,
+    deepseek_chat_sync,
+)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -34,6 +43,12 @@ st.markdown("""
 <style>
   .main-header{background:linear-gradient(90deg,#1a1a2e,#16213e,#0f3460);
     padding:1.2rem 2rem;border-radius:10px;margin-bottom:1.5rem;color:white;}
+  .premium-glass{background:linear-gradient(135deg,rgba(15,52,96,.96),rgba(32,62,114,.96));
+    color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:14px;padding:1rem 1.1rem;
+    box-shadow:0 8px 24px rgba(15,52,96,.22);margin-bottom:1rem;}
+  .premium-note{background:#f8fbff;border:1px solid #d7e3f4;border-radius:12px;padding:.85rem 1rem;margin:.5rem 0;}
+  .badge-pill{display:inline-block;background:#e8f1ff;color:#18406f;border:1px solid #c9ddf7;
+    border-radius:999px;padding:.2rem .55rem;font-size:.78rem;margin-right:.35rem;}
   .metric-card{background:#f8f9fa;border-left:4px solid #0f3460;
     padding:1rem;border-radius:8px;margin:.5rem 0;}
   .drug-card{background:white;border:1px solid #dee2e6;border-radius:10px;
@@ -69,11 +84,165 @@ def parse_json_fields(d: dict) -> dict:
     return d
 
 
+def is_creator_question(text: str) -> bool:
+    if not text:
+        return False
+    q = text.strip().lower()
+    phrases = [
+        "who created you",
+        "who made you",
+        "who made this chatbot",
+        "who made this bot",
+        "who built you",
+        "who is your creator",
+        "who developed you",
+        "who designed you",
+    ]
+    return any(phrase in q for phrase in phrases)
+
+
+def build_prompt_preview(role: str, topic: str, mode: str, extra_notes: str = "") -> str:
+    topic = (topic or "").strip()
+    extra_notes = (extra_notes or "").strip()
+
+    templates = {
+        "Clinical summary": (
+            "Give a professional clinical summary with mechanism of action, main indications, usual dosing, "
+            "important contraindications, interactions, monitoring, and key counselling points."
+        ),
+        "Patient-friendly explanation": (
+            "Explain it in simple everyday language for a non-clinician. Use short sentences, friendly tone, "
+            "and include what the medicine treats, how it helps, common side effects, and when to seek help."
+        ),
+        "Safety / interaction review": (
+            "Focus on safety. Summarise major interactions, contraindications, red flags, and what must be monitored."
+        ),
+        "Teaching note": (
+            "Teach this topic clearly for a learner. Include definitions, how the medicine works, and a memorable analogy."
+        ),
+    }
+
+    base = templates.get(mode, templates["Clinical summary"])
+    lines = [
+        f"You are answering as a senior medical AI for a {role.lower()}.",
+        f"Topic: {topic or 'General pharmacology'}",
+        f"Task: {base}",
+        "Use bullet points where helpful.",
+        "Be accurate, concise, and professional.",
+        "If uncertain, say so and recommend checking a trusted reference.",
+    ]
+    if extra_notes:
+        lines.append(f"Extra instructions: {extra_notes}")
+    return "\n".join(lines)
+
+
+def render_copy_button(text: str, key: str = "copy_prompt"):
+    payload = json.dumps(text or "")
+    html = f"""
+    <div style="margin-top:0.35rem;">
+      <button id="{key}" style="
+        background:#0f3460;color:white;border:none;border-radius:8px;
+        padding:0.55rem 0.8rem;font-size:0.92rem;cursor:pointer;width:100%;
+      ">📋 Copy prompt</button>
+      <script>
+        const btn = document.getElementById("{key}");
+        btn.addEventListener('click', async () => {{
+          try {{
+            await navigator.clipboard.writeText({payload});
+            const old = btn.innerText;
+            btn.innerText = '✅ Copied';
+            setTimeout(() => btn.innerText = old, 1400);
+          }} catch (err) {{
+            btn.innerText = 'Copy unavailable';
+          }}
+        }});
+      </script>
+    </div>
+    """
+    components.html(html, height=56)
+
+
+def navigate_to(page_name: str, hint: str = ""):
+    st.session_state.current_page = page_name
+    if hint:
+        st.session_state.page_hint = hint
+    st.rerun()
+
+
+def chat_transcript(history: list[dict]) -> str:
+    lines = []
+    for i, msg in enumerate(history, 1):
+        role = str(msg.get("role", "assistant")).upper()
+        content = str(msg.get("content", "")).strip()
+        lines.append(f"[{i}] {role}\n{content}\n")
+    return "\n".join(lines).strip()
+
+
+def render_section_ai_assistant(
+    section_key: str,
+    section_title: str,
+    context_text: str = "",
+    suggestions: list[str] | None = None,
+):
+    suggestions = suggestions or []
+    st.markdown("### 🤖 AI Assistant")
+    st.caption(f"Ask anything about {section_title.lower()} and get one final clinical explanation.")
+
+    if suggestions:
+        cols = st.columns(min(3, len(suggestions)))
+        for idx, suggestion in enumerate(suggestions[:3]):
+            with cols[idx]:
+                if st.button(suggestion[:28] + ("..." if len(suggestion) > 28 else ""), key=f"{section_key}_s_{idx}"):
+                    st.session_state[f"{section_key}_q"] = suggestion
+
+    st.text_area(
+        "Ask AI",
+        key=f"{section_key}_q",
+        height=95,
+        placeholder=f"Ask AI about {section_title.lower()}...",
+    )
+
+    if st.button("Get AI explanation", key=f"{section_key}_ask", use_container_width=True):
+        prompt = st.session_state.get(f"{section_key}_q", "").strip()
+        if not prompt:
+            st.warning("Please enter a question first.")
+        else:
+            guided_prompt = (
+                f"Section: {section_title}\n"
+                f"User role: {st.session_state.role}\n"
+                f"Context:\n{context_text or 'General clinical context'}\n\n"
+                f"User question:\n{prompt}\n\n"
+                "Give one concise, professional response with practical guidance and safety points."
+            )
+            msgs = build_pharmacist_messages(guided_prompt, role=st.session_state.role)
+            with st.spinner("🤖 AI is preparing your answer..."):
+                st.session_state[f"{section_key}_a"] = consensus_chat_sync(msgs, max_tokens=1400, temperature=0.2)
+
+    answer = st.session_state.get(f"{section_key}_a", "")
+    if answer:
+        st.markdown(answer)
+        render_copy_button(answer, key=f"copy_{section_key}_answer")
+        st.download_button(
+            "Download answer",
+            data=answer,
+            file_name=f"{section_key}_ai_answer.txt",
+            mime="text/plain",
+            key=f"{section_key}_dl",
+            use_container_width=True,
+        )
+
+
 # ─── Session state init ───────────────────────────────────────────────────────
 for key, default in [
     ("role", "Doctor"), ("selected_patient_id", None),
     ("chat_history", []), ("interaction_drugs", []),
     ("ai_chat_history", []),
+    ("ai_chat_topic", ""),
+    ("ai_chat_notes", ""),
+    ("ai_chat_style", "Clinical summary"),
+    ("ai_pasted_prompt", ""),
+    ("current_page", "🏠 Dashboard"),
+    ("page_hint", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -100,22 +269,32 @@ with st.sidebar:
     st.divider()
 
     st.subheader("📋 Navigation")
-    page = st.radio("Go to:", [
+    nav_pages = [
         "🏠 Dashboard", "💊 Drug Database", "⚠️ Interaction Checker",
         "🧑 Patient Manager", "🔬 Lab Interpreter", "🍎 Diet & Ayurveda",
         "🧬 Pharmacogenomics", "🚨 Emergency Protocols",
         "📊 Analytics", "🤖 AI Chat",
-    ])
-
+    ]
+    if st.session_state.current_page not in nav_pages:
+        st.session_state.current_page = "🏠 Dashboard"
+    selected_page = st.radio("Go to:", nav_pages, index=nav_pages.index(st.session_state.current_page))
+    if selected_page != st.session_state.current_page:
+        st.session_state.current_page = selected_page
     st.divider()
     st.caption(f"DB: {DB_PATH}")
     st.caption(f"v3.1 | {datetime.now().strftime('%d %b %Y')}")
+
+page = st.session_state.current_page
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 if page == "🏠 Dashboard":
+    if st.session_state.page_hint:
+        st.info(st.session_state.page_hint)
+        st.session_state.page_hint = ""
+
     st.markdown("""
     <div class='main-header'>
       <h1>🏥 Hospital Pharmacology System</h1>
@@ -163,10 +342,47 @@ if page == "🏠 Dashboard":
         "Patient": ["Understand My Meds","Ayurveda Guide","Diet Planner","Ask AI a Question"],
         "Medical Student": ["Drug Database","Pharmacogenomics","Clinical Calculator","AI Chat"],
     }
+    action_routes = {
+        "Check Drug Interactions": ("⚠️ Interaction Checker", "Opened Interaction Checker."),
+        "Calculate Renal Doses": ("💊 Drug Database", "Opened Drug Database. Use dosing/renal sections per medication."),
+        "Risk Score": ("🧑 Patient Manager", "Opened Patient Manager. Select or add a patient to continue risk workflows."),
+        "AI Consultation": ("🤖 AI Chat", "Opened AI Chat for clinical consultation."),
+        "Drug Monograph": ("💊 Drug Database", "Opened Drug Database monographs."),
+        "Interaction Checker": ("⚠️ Interaction Checker", "Opened Interaction Checker."),
+        "TDM Calculations": ("📊 Analytics", "Opened Analytics. Use PK simulation for dose/monitoring support."),
+        "Substitutions": ("💊 Drug Database", "Opened Drug Database for alternatives and class comparisons."),
+        "Medication Admin": ("🚨 Emergency Protocols", "Opened Emergency Protocols and practical medication guidance."),
+        "Lab Interpretation": ("🔬 Lab Interpreter", "Opened Lab Interpreter."),
+        "Emergency Protocols": ("🚨 Emergency Protocols", "Opened Emergency Protocols."),
+        "Patient Meds": ("🧑 Patient Manager", "Opened Patient Manager."),
+        "Understand My Meds": ("💊 Drug Database", "Opened Drug Database with patient-friendly guides."),
+        "Ayurveda Guide": ("🍎 Diet & Ayurveda", "Opened Diet & Ayurveda guide."),
+        "Diet Planner": ("🍎 Diet & Ayurveda", "Opened Diet Plan Generator."),
+        "Ask AI a Question": ("🤖 AI Chat", "Opened AI Chat."),
+        "Pharmacogenomics": ("🧬 Pharmacogenomics", "Opened Pharmacogenomics."),
+        "Clinical Calculator": ("📊 Analytics", "Opened Analytics with calculation tools."),
+        "AI Chat": ("🤖 AI Chat", "Opened AI Chat."),
+    }
     cols = st.columns(4)
     for i, action in enumerate(role_actions.get(role, [])):
         with cols[i]:
-            st.button(f"→ {action}", key=f"qa_{i}", use_container_width=True)
+            if st.button(f"→ {action}", key=f"qa_{i}", use_container_width=True):
+                target, hint = action_routes.get(action, ("🏠 Dashboard", "Opened Dashboard."))
+                navigate_to(target, hint)
+
+    render_section_ai_assistant(
+        "dash_ai",
+        "Dashboard",
+        context_text=(
+            f"Medication count: {total_meds}; Interaction count: {total_ix}; Patient count: {total_pts}; "
+            f"Ayurveda entries: {ayur}; Lab tests: {labs}."
+        ),
+        suggestions=[
+            "Summarize today's key clinical risks",
+            "What should a doctor check first?",
+            "Give role-specific next steps",
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,6 +417,17 @@ elif page == "💊 Drug Database":
 
     meds = query_db(sql, tuple(params))
     st.caption(f"Found **{len(meds)}** medications")
+
+    render_section_ai_assistant(
+        "drugdb_ai",
+        "Drug Database",
+        context_text=f"Current filter category: {sel_cat}. Search: {search or 'none'}. Results shown: {len(meds)} medications.",
+        suggestions=[
+            "Compare two drugs for safety",
+            "Explain a drug in patient language",
+            "Give monitoring checklist",
+        ],
+    )
 
     for med in meds:
         med = parse_json_fields(med)
@@ -310,7 +537,7 @@ elif page == "💊 Drug Database":
                     if st.session_state[gen_key]:
                         st.markdown(st.session_state[gen_key])
                     else:
-                        st.info("🤖 Click below to get an AI explanation powered by DeepSeek")
+                        st.info("🤖 Click below to get an AI explanation powered by Bain Oduwo")
                         if st.button(f"🤖 Explain this medicine for me", key=f"btn_{med['id']}"):
                             prompt_msgs = [
                                 {"role": "system", "content": "You are a friendly pharmacist explaining medicines to patients with no medical background. Use simple everyday language, short sentences, and emojis. Be warm and reassuring."},
@@ -353,8 +580,12 @@ elif page == "⚠️ Interaction Checker":
                 if rows:
                     results.extend([parse_json_fields(r) for r in rows])
                 else:
-                    results.append({"drug_a": a, "drug_b": b, "severity": "Not in DB",
-                                    "mechanism": "Manual review required"})
+                    results.append({
+                        "drug_a": a,
+                        "drug_b": b,
+                        "severity": "Needs clinical review",
+                        "mechanism": "Use pharmacology principles and patient-specific risk assessment.",
+                    })
 
         qt_flags = SafetyChecker.check_qt_risk(selected_drugs)
         beers = SafetyChecker.check_beers_criteria(selected_drugs, age=70)
@@ -393,6 +624,17 @@ elif page == "⚠️ Interaction Checker":
         if beers:
             st.subheader("👴 Beers Criteria Flags (Elderly)")
             for b in beers: st.warning(b)
+
+    render_section_ai_assistant(
+        "interaction_ai",
+        "Interaction Checker",
+        context_text=f"Selected drugs: {', '.join(selected_drugs) if selected_drugs else 'none'}.",
+        suggestions=[
+            "Explain this interaction simply",
+            "Suggest safer alternatives",
+            "Give monitoring plan",
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,6 +707,17 @@ elif page == "🧑 Patient Manager":
             conn.commit()
             st.success(f"✅ Patient {pt_name} registered successfully!")
 
+    render_section_ai_assistant(
+        "patient_ai",
+        "Patient Manager",
+        context_text="Use patient profile fields (age, diagnoses, creatinine, HbA1c, allergies) for guidance.",
+        suggestions=[
+            "Create a medication safety checklist",
+            "How to prioritize patient risks",
+            "What labs should be monitored",
+        ],
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LAB INTERPRETER
@@ -475,7 +728,7 @@ elif page == "🔬 Lab Interpreter":
 
     with tab1:
         c1, c2, c3, c4 = st.columns(4)
-        with c1: test_name = st.text_input("Test Name", "Hemoglobin")
+        with c1: test_name = st.text_input("Test Name", "Hb")
         with c2: test_value = st.number_input("Value", 0.0, 10000.0, 10.5, step=0.1)
         with c3: lab_gender = st.selectbox("Gender", ["male","female"], key="lg")
         with c4: lab_age = st.number_input("Age", 0, 120, 40, key="la")
@@ -492,7 +745,7 @@ elif page == "🔬 Lab Interpreter":
 
     with tab2:
         panel_input = st.text_area("Lab Results (one per line: TestName=Value)",
-            "Hemoglobin=10.5\nWBC=12.5\nPlatelet=450\nSodium=138\nPotassium=5.2\nCreatinine=1.8\nGlucose=320\nALT=85",
+            "Hb=10.5\nWBC=12.5\nPLT=450\nSodium=138\nPotassium=5.2\nCreatinine=1.8\nGlucose=320\nALT=85",
             height=200)
         p_gender = st.selectbox("Gender", ["male","female"], key="pg")
         p_age = st.number_input("Age", 0, 120, 55, key="pa")
@@ -517,6 +770,17 @@ elif page == "🔬 Lab Interpreter":
                 if "Normal" in str(val): return "background-color:#d4edda"
                 return ""
             st.dataframe(df.style.applymap(color_status, subset=["Status"]), use_container_width=True)
+
+    render_section_ai_assistant(
+        "lab_ai",
+        "Lab Interpreter",
+        context_text="Interpret clinical meaning, urgency, and medication implications of abnormal laboratory values.",
+        suggestions=[
+            "Explain this abnormal panel",
+            "Which values are most urgent?",
+            "Medication implications of these labs",
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,6 +891,17 @@ elif page == "🍎 Diet & Ayurveda":
             else:
                 st.success(f"✅ No herb/food interactions found for {drug_to_check}")
 
+    render_section_ai_assistant(
+        "diet_ai",
+        "Diet & Ayurveda",
+        context_text="Provide evidence-aware lifestyle, nutrition, and herb-drug interaction support.",
+        suggestions=[
+            "Build a practical one-day meal guide",
+            "Explain herb-drug safety",
+            "Patient-friendly nutrition advice",
+        ],
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PHARMACOGENOMICS  — FIXED column names
@@ -723,6 +998,17 @@ elif page == "🧬 Pharmacogenomics":
                 else: st.warning(a)
             if not alerts: st.success("✅ No critical PGx interactions detected")
 
+    render_section_ai_assistant(
+        "pgx_ai",
+        "Pharmacogenomics",
+        context_text="Use gene-phenotype and drug-gene relationships to guide safer medication decisions.",
+        suggestions=[
+            "Explain this gene-drug risk",
+            "Dose implications by phenotype",
+            "PGx counseling points",
+        ],
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  EMERGENCY PROTOCOLS  — FIXED column name
@@ -734,8 +1020,16 @@ elif page == "🚨 Emergency Protocols":
     # FIXED: query uses 'name' (not 'protocol_name')
     protocols = query_db("SELECT * FROM emergency_protocols ORDER BY category, name")
     if not protocols:
-        st.info("No protocols seeded yet. Check seed files.")
-    else:
+        st.warning("Emergency protocols are being initialized for first-time use.")
+        try:
+            seed_emergency_protocols()
+            protocols = query_db("SELECT * FROM emergency_protocols ORDER BY category, name")
+            if protocols:
+                st.success("Emergency protocols loaded successfully.")
+        except Exception as e:
+            st.error(f"Could not initialize emergency protocols: {e}")
+            st.caption("Run `python startup.py` to complete initialization.")
+    if protocols:
         categories = list(set(p.get("category","") for p in protocols))
         sel_cat = st.selectbox("Protocol Category", ["All"] + sorted(categories))
         for p in protocols:
@@ -754,6 +1048,17 @@ elif page == "🚨 Emergency Protocols":
                         st.markdown(f"  - 💊 {d}")
                 if p.get("doses"): st.markdown(f"**Doses:** {p['doses']}")
                 if p.get("notes"): st.info(p["notes"])
+
+    render_section_ai_assistant(
+        "emergency_ai",
+        "Emergency Protocols",
+        context_text="Provide concise emergency support steps, safety flags, and escalation reminders.",
+        suggestions=[
+            "Give a rapid response checklist",
+            "Explain first-line emergency meds",
+            "What to monitor immediately",
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -800,146 +1105,290 @@ elif page == "📊 Analytics":
                            xaxis_title="Time (h)", yaxis_title="Conc (mg/L)")
         st.plotly_chart(fig4, use_container_width=True)
 
+    st.divider()
+    st.subheader("⬇️ Export Analytics Data")
+    tab_a, tab_b, tab_c, tab_d = st.tabs(["Medication Counts", "Interaction Severity", "Ayurveda Types", "PK Simulation"])
+    with tab_a:
+        st.dataframe(cat_df, use_container_width=True)
+        st.download_button("Download medication counts CSV", cat_df.to_csv(index=False), "medication_counts.csv", "text/csv")
+    with tab_b:
+        st.dataframe(sev_df, use_container_width=True)
+        st.download_button("Download interaction severity CSV", sev_df.to_csv(index=False), "interaction_severity.csv", "text/csv")
+    with tab_c:
+        st.dataframe(ayur_df, use_container_width=True)
+        st.download_button("Download ayurveda type CSV", ayur_df.to_csv(index=False), "ayurveda_types.csv", "text/csv")
+    with tab_d:
+        pk_df = pd.DataFrame({"time_h": time, "concentration_mg_per_l": conc})
+        st.dataframe(pk_df.head(40), use_container_width=True)
+        st.download_button("Download PK simulation CSV", pk_df.to_csv(index=False), "pk_simulation.csv", "text/csv")
+
+    render_section_ai_assistant(
+        "analytics_ai",
+        "Analytics",
+        context_text=(
+            f"Medication categories tracked: {len(cat_df)}; interaction severities tracked: {len(sev_df)}; "
+            f"Ayurveda entry types tracked: {len(ayur_df)}; PK simulation drug: {sim_drug}."
+        ),
+        suggestions=[
+            "Summarize these analytics",
+            "Top safety insights from charts",
+            "What action should the team take?",
+        ],
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  AI CHAT  — Enhanced full-page AI chat with role-awareness + quick drug ask
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🤖 AI Chat":
     st.markdown(f"""
-    <div class='main-header'>
-      <h2>🤖 AI Clinical  Chat</h2>
-      <p>Powered by DrugD Bain Oduwo  · {st.session_state.role} Mode · Ask anything about medications, conditions, or pharmacology</p>
+    <div class='main-header premium-glass'>
+      <h2>🤖 AI Clinical Chat</h2>
+      <p>Professional pharmacology assistant for {st.session_state.role} mode.</p>
+      <div>
+        <span class='badge-pill'>Medical Context</span>
+        <span class='badge-pill'>Medication Safety</span>
+        <span class='badge-pill'>Clinical Clarity</span>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Role-aware preset questions
+    available = available_providers()
+
     presets = {
         "Doctor": [
             "Dose adjustment for metformin in CKD stage 3b?",
-            "Compare SGLT2 inhibitors in heart failure with reduced ejection fraction",
-            "Management of warfarin over-anticoagulation (INR >8)?",
-            "First-line antibiotics for CAP in a penicillin-allergic patient",
+            "Compare SGLT2 inhibitors in heart failure with reduced ejection fraction.",
+            "Management of warfarin over-anticoagulation (INR >8).",
+            "First-line antibiotics for CAP in a penicillin-allergic patient.",
         ],
         "Pharmacist": [
-            "Counselling points for a patient starting warfarin",
-            "Drug interactions between warfarin and common antibiotics — full list",
-            "Generic substitution options for unavailable clopidogrel",
-            "Explain therapeutic drug monitoring for vancomycin",
+            "Counselling points for a patient starting warfarin.",
+            "Drug interactions between warfarin and common antibiotics — full list.",
+            "Generic substitution options for unavailable clopidogrel.",
+            "Explain therapeutic drug monitoring for vancomycin.",
         ],
         "Nurse": [
-            "Signs of digoxin toxicity to watch for",
-            "IV vancomycin administration guidelines and rate",
-            "Morphine dose titration for acute pain — nursing guide",
-            "How to identify and manage anaphylaxis",
+            "Signs of digoxin toxicity to watch for.",
+            "IV vancomycin administration guidelines and rate.",
+            "Morphine dose titration for acute pain — nursing guide.",
+            "How to identify and manage anaphylaxis.",
         ],
         "Patient": [
             "What does metformin do and when should I take it?",
             "Can I take ibuprofen with my blood pressure medicine?",
             "What foods should I avoid while taking warfarin?",
-            "Explain type 2 diabetes to me in simple terms",
+            "Explain type 2 diabetes to me in simple terms.",
             "What side effects should I watch for with my new medication?",
             "Is it safe to take two medications at the same time?",
         ],
         "Medical Student": [
-            "Explain the mechanism of beta-blockers in heart failure",
-            "Pharmacokinetics of aminoglycosides — clinical importance",
-            "CYP enzyme interactions — full clinical guide",
-            "Explain the renin-angiotensin-aldosterone system and where drugs act",
+            "Explain the mechanism of beta-blockers in heart failure.",
+            "Pharmacokinetics of aminoglycosides — clinical importance.",
+            "CYP enzyme interactions — full clinical guide.",
+            "Explain the renin-angiotensin-aldosterone system and where drugs act.",
         ],
     }
 
-    # Layout: presets sidebar + main chat
-    col_presets, col_chat = st.columns([1, 3])
+    def run_chat(prompt: str) -> str:
+        if is_creator_question(prompt):
+            return CREATOR_RESPONSE
+
+        messages = build_pharmacist_messages(
+            prompt,
+            role=st.session_state.role,
+            history=st.session_state.ai_chat_history[:-1],
+        )
+        return consensus_chat_sync(messages, max_tokens=1600, temperature=0.2)
+
+    def submit_prompt(prompt: str):
+        prompt = (prompt or "").strip()
+        if not prompt:
+            st.warning("Please enter or paste a prompt first.")
+            return
+
+        st.session_state.ai_chat_history.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            placeholder.markdown("⏳ Preparing your final answer...")
+            with st.spinner("🤖 AI thinking..."):
+                response = run_chat(prompt)
+            placeholder.markdown(response)
+
+        st.session_state.ai_chat_history.append({"role": "assistant", "content": response})
+        st.rerun()
+
+    col_presets, col_chat = st.columns([1.15, 2.85])
 
     with col_presets:
+        st.subheader("⚙️ AI mode")
+        st.markdown(
+            """
+            <div class='premium-note'>
+              <b>Enhanced reasoning is enabled.</b><br/>
+              The chatbot returns one final clinical answer with a concise, professional format.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if all(k in available for k in ["openai", "deepseek"]):
+            st.caption("Enhanced answer quality is active.")
+        elif available:
+            st.caption("Enhanced mode is active with fallback based on available key(s).")
+        else:
+            st.warning("No API keys detected. Add `OPENAI_API_KEY` and/or `DEEPSEEK_API_KEY`.")
+
+        st.subheader("✍️ Prompt composer")
+        composer_mode = st.selectbox(
+            "Prompt style",
+            ["Clinical summary", "Patient-friendly explanation", "Safety / interaction review", "Teaching note"],
+            index=["Clinical summary", "Patient-friendly explanation", "Safety / interaction review", "Teaching note"].index(st.session_state.ai_chat_style),
+            key="ai_chat_style",
+        )
+        composer_topic = st.text_input(
+            "Topic / drug / condition",
+            placeholder="e.g. warfarin, asthma, CKD dosing, metformin",
+            key="ai_chat_topic",
+        )
+        extra_notes = st.text_area(
+            "Extra instructions",
+            placeholder="Add patient age, tone, focus areas, or any special instruction.",
+            height=100,
+            key="ai_chat_notes",
+        )
+
+        prompt_preview = build_prompt_preview(st.session_state.role, composer_topic, composer_mode, extra_notes)
+        st.text_area("Prompt preview", value=prompt_preview, height=220)
+        render_copy_button(prompt_preview, key="prompt_copy_button")
+        st.download_button(
+            "⬇️ Download prompt",
+            data=prompt_preview,
+            file_name="pharmacology_prompt.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+        if st.button("➕ Send composed prompt", use_container_width=True):
+            submit_prompt(prompt_preview)
+
+        st.subheader("📥 Paste prompt")
+        st.text_area(
+            "Paste your prompt here (multi-line supported)",
+            key="ai_pasted_prompt",
+            height=130,
+            placeholder="Paste any full prompt here, then click Send pasted prompt.",
+        )
+        if st.button("🚀 Send pasted prompt", use_container_width=True):
+            submit_prompt(st.session_state.ai_pasted_prompt)
+
+        st.divider()
         st.markdown(f"**💡 Quick Questions for {st.session_state.role}:**")
         for preset in presets.get(st.session_state.role, []):
-            label = preset[:48] + "..." if len(preset) > 48 else preset
+            label = preset[:52] + "..." if len(preset) > 52 else preset
             if st.button(label, key=f"preset_{preset[:30]}", use_container_width=True):
-                st.session_state.ai_chat_history.append({"role":"user","content":preset})
-                msgs = build_pharmacist_messages(preset, role=st.session_state.role,
-                                                  history=st.session_state.ai_chat_history[:-1])
-                with st.spinner("🤖 AI thinking..."):
-                    response = deepseek_chat_sync(msgs, max_tokens=1500)
-                st.session_state.ai_chat_history.append({"role":"assistant","content":response})
-                st.rerun()
+                st.session_state.ai_chat_topic = preset
+                submit_prompt(preset)
 
         st.divider()
         st.markdown("**💊 Ask about a specific drug:**")
         quick_drug = st.text_input("Drug name", placeholder="e.g. Metoprolol")
-        quick_mode = st.radio("Mode", ["Clinical info","Patient-friendly explanation","Side effects summary"])
+        quick_mode = st.radio("Mode", ["Clinical info", "Patient-friendly explanation", "Side effects summary"])
 
-        if quick_drug and st.button("🔍 Go", use_container_width=True):
+        if quick_drug and st.button("🔍 Generate drug prompt", use_container_width=True):
             mode_prompts = {
                 "Clinical info": f"Give me a comprehensive clinical summary of {quick_drug}: mechanism, indications, dosing, key interactions, monitoring.",
-                "Patient-friendly explanation": f"Explain {quick_drug} to a patient with no medical background. Use simple language, analogies, and emojis. Include what conditions it treats (explain those conditions simply too).",
-                "Side effects summary": f"List all important side effects of {quick_drug} organized by frequency (common/uncommon/rare/serious). Include what to do if they occur.",
+                "Patient-friendly explanation": f"Explain {quick_drug} to a patient with no medical background. Use simple language, analogies, and emojis. Include what conditions it treats and explain those conditions simply.",
+                "Side effects summary": f"List all important side effects of {quick_drug} organized by frequency (common, uncommon, rare, serious). Include what to do if they occur.",
             }
             prompt = mode_prompts.get(quick_mode, f"Tell me about {quick_drug}")
-            st.session_state.ai_chat_history.append({"role":"user","content":prompt})
-            msgs = build_pharmacist_messages(prompt, role=st.session_state.role,
-                                              history=st.session_state.ai_chat_history[:-1])
-            with st.spinner("🤖 AI thinking..."):
-                response = deepseek_chat_sync(msgs, max_tokens=1500)
-            st.session_state.ai_chat_history.append({"role":"assistant","content":response})
-            st.rerun()
+            st.session_state.ai_chat_topic = prompt
+            submit_prompt(prompt)
 
         st.divider()
+        if st.session_state.ai_chat_history and st.button("🗑️ Clear Chat", use_container_width=True):
+            st.session_state.ai_chat_history = []
+            st.rerun()
+
         if st.session_state.ai_chat_history:
-            if st.button("🗑️ Clear Chat", use_container_width=True):
-                st.session_state.ai_chat_history = []
-                st.rerun()
+            st.subheader("📤 Chat export")
+            transcript = chat_transcript(st.session_state.ai_chat_history)
+            latest_assistant = next(
+                (m.get("content", "") for m in reversed(st.session_state.ai_chat_history) if m.get("role") == "assistant"),
+                "",
+            )
+            st.text_area("Latest assistant answer", value=latest_assistant, height=110)
+            render_copy_button(latest_assistant, key="copy_latest_answer")
+            st.download_button(
+                "Download full chat (.txt)",
+                data=transcript,
+                file_name="pharmacliniq_chat.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+            st.download_button(
+                "Download full chat (.json)",
+                data=json.dumps(st.session_state.ai_chat_history, indent=2),
+                file_name="pharmacliniq_chat.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
         st.markdown("---")
-        st.markdown("""
-        <div style='font-size:0.75rem;color:#666;'>
-        ⚠️ <b>Disclaimer:</b> AI responses are for educational purposes only.
-        Always consult a qualified healthcare professional for clinical decisions.
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div style='font-size:0.75rem;color:#666;'>
+            ⚠️ <b>Disclaimer:</b> AI responses are for educational purposes only.
+            Always consult a qualified healthcare professional for clinical decisions.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     with col_chat:
-        # Display chat history
-        chat_container = st.container()
-        with chat_container:
-            if not st.session_state.ai_chat_history:
-                st.markdown("""
-                <div style='text-align:center;padding:3rem;color:#666;'>
-                  <h3>👋 Hello! I'm your AI Clinical expert</h3>
-                  <p>I can help you with:</p>
-                  <p>💊 Drug information & mechanisms &nbsp;|&nbsp; ⚠️ Drug interactions</p>
-                  <p>🏥 Condition explanations &nbsp;|&nbsp; 📊 Dosing guidelines</p>
-                  <p>🧬 Pharmacogenomics &nbsp;|&nbsp; 🍎 Drug-food interactions</p>
+        if not st.session_state.ai_chat_history:
+            st.markdown(
+                """
+                <div class='premium-note' style='text-align:center;padding:2.2rem;color:#3e4a59;'>
+                  <h3>👋 Welcome to AI Clinical Chat</h3>
+                  <p>I can help with medication guidance, interactions, dosing, patient counselling, and teaching support.</p>
+                  <p>Use the prompt composer on the left to build a polished prompt you can copy or send.</p>
                   <br/>
-                  <p><i>Type your question below or click a quick question →</i></p>
+                  <p><i>Type your question below to chat live.</i></p>
                 </div>
-                """, unsafe_allow_html=True)
-            else:
-                for msg in st.session_state.ai_chat_history:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            for msg in st.session_state.ai_chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-        # Input box
         user_input = st.chat_input(
             f"Ask anything — {st.session_state.role} mode (e.g. 'What is metformin for?', 'Explain hypertension simply')"
         )
 
         if user_input:
-            st.session_state.ai_chat_history.append({"role":"user","content":user_input})
+            st.session_state.ai_chat_history.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
                 st.markdown(user_input)
 
-            msgs = build_pharmacist_messages(
-                user_input,
-                role=st.session_state.role,
-                history=st.session_state.ai_chat_history[:-1],
-            )
             with st.chat_message("assistant"):
                 placeholder = st.empty()
-                full_response = ""
-                for chunk in deepseek_stream_sync(msgs, max_tokens=1500):
-                    full_response += chunk
-                    placeholder.markdown(full_response + "▌")
-                placeholder.markdown(full_response)
+                placeholder.markdown("⏳ Preparing your final answer...")
+                if is_creator_question(user_input):
+                    full_response = CREATOR_RESPONSE
+                    placeholder.markdown(full_response)
+                else:
+                    msgs = build_pharmacist_messages(
+                        user_input,
+                        role=st.session_state.role,
+                        history=st.session_state.ai_chat_history[:-1],
+                    )
+                    with st.spinner("🤖 AI thinking..."):
+                        full_response = consensus_chat_sync(msgs, max_tokens=1600, temperature=0.2)
+                    placeholder.markdown(full_response)
 
-            st.session_state.ai_chat_history.append({"role":"assistant","content":full_response})
+            st.session_state.ai_chat_history.append({"role": "assistant", "content": full_response})

@@ -110,6 +110,12 @@ def create_all_tables():
         created_at TEXT DEFAULT (datetime('now'))
     )""")
 
+    # Fast, resilient matching for lab lookups.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lab_test_name ON lab_reference_ranges(test_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lab_abbreviation ON lab_reference_ranges(abbreviation)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lab_test_name_lower ON lab_reference_ranges(LOWER(test_name))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lab_abbreviation_lower ON lab_reference_ranges(LOWER(abbreviation))")
+
     # FIXED: added name, blood_group, diagnoses columns
     cur.execute("""CREATE TABLE IF NOT EXISTS patient_profiles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,6 +212,7 @@ def create_all_tables():
         notes TEXT, reference TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emergency_category ON emergency_protocols(category)")
 
     # Added plain_english column for patient education
     cur.execute("""CREATE TABLE IF NOT EXISTS conditions (

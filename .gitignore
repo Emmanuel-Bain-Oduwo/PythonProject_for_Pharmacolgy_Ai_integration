@@ -1,3 +1,15 @@
 
 models/*.pkl
 identifier.sqlite
+
+# Python cache
+__pycache__/
+*.pyc
+
+# SQLite sidecar files
+*.sqlite-shm
+*.sqlite-wal
+
+# Local Streamlit secrets
+.streamlit/secrets.toml
+

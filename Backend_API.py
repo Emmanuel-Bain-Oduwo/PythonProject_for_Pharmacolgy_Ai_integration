@@ -14,8 +14,10 @@ from pydantic import BaseModel, Field
 
 from db_config import DB_PATH
 from clinical_engine import ClinicalCalculator, DoseAdjustmentEngine, SafetyChecker, PatientProfile, Gender
-from ml_models import PatientRiskModel, DrugInteractionPredictor, DietRecommendationEngine, LabInterpreter, VisualisationEngine, train_all_models
+from ml_models import PatientRiskModel, DrugInteractionPredictor, DietRecommendationEngine, VisualisationEngine, train_all_models
+from lab_interpreter import LabInterpreter
 from deepseek_config import deepseek_chat
+from seed_emergency_protocols import seed_emergency_protocols
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -154,13 +156,21 @@ def check_interactions(req: InteractionCheckRequest):
                 "SELECT * FROM drug_interactions WHERE (drug_a LIKE ? AND drug_b LIKE ?) OR (drug_a LIKE ? AND drug_b LIKE ?)",
                 (f"%{a}%", f"%{b}%", f"%{b}%", f"%{a}%")
             ).fetchone()
-            results.append(row_to_dict(row) if row else {"drug_a": a, "drug_b": b, "severity": "Unknown",
-                "mechanism": "Not in database", "management": "Manual review required"})
+            results.append(
+                row_to_dict(row)
+                if row else {
+                    "drug_a": a,
+                    "drug_b": b,
+                    "severity": "Needs clinical review",
+                    "mechanism": "No direct pair record available; assess using pharmacology and patient factors.",
+                    "management": "Use cautious co-prescribing, monitor closely, and review alternatives if needed.",
+                }
+            )
     qt_flags = SafetyChecker.check_qt_risk(req.drug_names)
     beers = SafetyChecker.check_beers_criteria(req.drug_names, age=70)
     conn.close()
     return {"drugs_checked": req.drug_names,
-            "interactions_found": len([r for r in results if r.get("severity") != "Unknown"]),
+            "interactions_found": len([r for r in results if r.get("severity") not in {"Unknown", "Needs clinical review"}]),
             "interactions": results, "qt_prolongation_alert": qt_flags, "beers_criteria_flags": beers}
 
 
@@ -275,6 +285,10 @@ def get_reference_ranges(category: Optional[str] = None):
 
 @app.post("/labs/interpret", tags=["Labs"])
 def interpret_lab(test_name: str, value: float, gender: str = "male", age: int = 40):
+    if not str(test_name).strip():
+        raise HTTPException(422, "test_name is required")
+    if age < 0:
+        raise HTTPException(422, "age must be non-negative")
     return LabInterpreter().interpret(test_name, value, gender, age)
 
 
@@ -355,6 +369,11 @@ def list_emergency_protocols(category: Optional[str] = None):
     if category: sql += " AND category=?"; params.append(category)
     sql += " ORDER BY category, name"
     rows = conn.execute(sql, params).fetchall()
+    if not rows:
+        conn.close()
+        seed_emergency_protocols()
+        conn = get_db()
+        rows = conn.execute(sql, params).fetchall()
     conn.close(); return [row_to_dict(r) for r in rows]
 
 

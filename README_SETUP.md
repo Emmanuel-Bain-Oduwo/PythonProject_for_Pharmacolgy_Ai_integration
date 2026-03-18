@@ -34,9 +34,14 @@ source venv/bin/activate          # Linux/Mac
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Add your DeepSeek API key
+# 4. Add your API keys
 cp .env.template .env
-# Open .env and add: DEEPSEEK_API_KEY=your_key_here
+# Open .env and add:
+# DEEPSEEK_API_KEY=your_deepseek_key_here
+# OPENAI_API_KEY=your_openai_key_here
+
+# Optional (recommended for Streamlit local runs):
+# create .streamlit/secrets.toml and add the same keys
 
 # 5. ONE command to set everything up
 python startup.py
@@ -71,6 +76,7 @@ git push -u origin main
 5. Add secrets (click "Advanced settings" → "Secrets"):
    ```toml
    DEEPSEEK_API_KEY = "your_deepseek_api_key"
+    OPENAI_API_KEY = "your_openai_api_key"
    ```
 6. Click **Deploy** — done! 🚀
 
@@ -81,9 +87,10 @@ Share that URL with your 100 testers.
 Streamlit Cloud has an ephemeral filesystem. To persist data across restarts,
 add this at the top of `app_main_pharma.py`:
 ```python
+from pathlib import Path
 import subprocess, sys
 # Auto-init DB on first run
-if not os.path.exists("identifier.sqlite"):
+if not Path("identifier.sqlite").exists():
     subprocess.run([sys.executable, "startup.py"])
 ```
 
@@ -102,7 +109,7 @@ railway add
 railway up
 ```
 
-Set environment variable `DEEPSEEK_API_KEY` in Railway dashboard.
+Set environment variables `DEEPSEEK_API_KEY` and/or `OPENAI_API_KEY` in Railway dashboard.
 
 ---
 
@@ -149,10 +156,16 @@ Every medication now has a **🧑 Patient Guide** tab that:
 
 ### 2. Enhanced AI Chat Page
 - Dedicated full-page AI chat with role-aware presets
-- **Quick drug lookup** sidebar (Clinical info / Patient-friendly / Side effects)
-- Streaming responses (text appears as AI generates it)
-- Conversation history with clear button
-- Works for ALL roles — especially great for patients
+- Provider selector: **Auto / Consensus / OpenAI / DeepSeek**
+- Prompt composer with copy/download support
+- Explicit **paste prompt** box for multi-line prompts
+- **Quick drug lookup** panel (Clinical info / Patient-friendly / Side effects)
+- Streaming chat responses and conversation history
+- Deterministic creator answer when asked who made the assistant
+
+### Local secrets path (Windows)
+- `C:\Users\ADMIN\PycharmProjects\PythonProject for Pharmacolgy Ai integration\.streamlit\secrets.toml`
+- A template is included at `.streamlit/secrets.toml.example`
 
 ---
 
