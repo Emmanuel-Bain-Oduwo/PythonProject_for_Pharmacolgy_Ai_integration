@@ -8,6 +8,9 @@ ENHANCEMENTS:
   - AI Chat: dedicated, full-page chat that works for any user; role-aware presets;
   - Standalone AI Chat page with separate "Ask about a drug" quick mode
 """
+import startup
+startup.main()
+
 import streamlit as st
 import streamlit.components.v1 as components
 import sqlite3, json, pandas as pd, numpy as np
