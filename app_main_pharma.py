@@ -1144,7 +1144,7 @@ elif page == "🤖 AI Chat":
     st.markdown(f"""
     <div class='main-header premium-glass'>
       <h2>🤖 AI Clinical Chat</h2>
-      <p>Professional pharmacology assistant for {st.session_state.role} mode.</p>
+      <p>Professional pharmacology assistant for {st.session_state.role} mode by Bain Oduwo.</p>
       <div>
         <span class='badge-pill'>Medical Context</span>
         <span class='badge-pill'>Medication Safety</span>
