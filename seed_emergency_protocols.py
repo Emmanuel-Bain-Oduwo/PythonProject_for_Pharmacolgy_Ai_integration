@@ -308,6 +308,8 @@ def seed_emergency_protocols() -> Tuple[int, int]:
     updated = 0
 
     for item in PROTOCOLS:
+        drugs_val = item.get("drugs")
+        medications_val = item.get("medications", drugs_val)
         existing = cur.execute("SELECT id FROM emergency_protocols WHERE name=?", (item["name"],)).fetchone()
         if existing:
             cur.execute(
@@ -320,8 +322,8 @@ def seed_emergency_protocols() -> Tuple[int, int]:
                     item.get("category"),
                     item.get("indication"),
                     item.get("steps"),
-                    item.get("medications", item.get("drugs")),
-                    item.get("drugs"),
+                    medications_val,
+                    drugs_val,
                     item.get("doses"),
                     item.get("notes"),
                     item.get("reference"),
@@ -341,8 +343,8 @@ def seed_emergency_protocols() -> Tuple[int, int]:
                     item.get("category"),
                     item.get("indication"),
                     item.get("steps"),
-                    item.get("medications", item.get("drugs")),
-                    item.get("drugs"),
+                    medications_val,
+                    drugs_val,
                     item.get("doses"),
                     item.get("notes"),
                     item.get("reference"),
