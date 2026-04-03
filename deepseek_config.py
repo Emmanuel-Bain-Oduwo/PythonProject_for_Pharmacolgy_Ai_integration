@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -105,7 +105,7 @@ def resolve_provider(provider: str = "auto") -> str:
     return _resolve_provider(provider)
 
 
-def _provider_defaults(provider: str) -> tuple[str, Optional[str]]:
+def _provider_defaults(provider: str) -> Tuple[str, Optional[str]]:
     provider = _resolve_provider(provider)
     if provider == "openai":
         return OPENAI_MODEL, None

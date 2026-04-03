@@ -81,8 +81,10 @@ def query_db(sql: str, params: tuple = ()):
 def parse_json_fields(d: dict) -> dict:
     for k, v in d.items():
         if isinstance(v, str) and v.startswith(("[", "{")):
-            try: d[k] = json.loads(v)
-            except: pass
+            try:
+                d[k] = json.loads(v)
+            except (ValueError, json.JSONDecodeError):
+                pass
     return d
 
 

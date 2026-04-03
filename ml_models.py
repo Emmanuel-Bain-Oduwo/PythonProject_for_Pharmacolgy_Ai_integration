@@ -246,8 +246,10 @@ class LabInterpreter:
         else:                             result["status"] = "✅ Normal"
         result["clinical_meaning"] = ref["clinical_meaning"]
         if ref["drug_effects"]:
-            try:   result["drugs_affecting_this_test"] = json.loads(ref["drug_effects"])
-            except: pass
+            try:
+                result["drugs_affecting_this_test"] = json.loads(ref["drug_effects"])
+            except (ValueError, json.JSONDecodeError):
+                pass
         return result
 
 

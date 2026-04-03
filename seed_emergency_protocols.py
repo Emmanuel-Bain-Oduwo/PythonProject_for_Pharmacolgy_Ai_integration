@@ -7,6 +7,7 @@ Seeds core emergency protocols used by the Streamlit and API emergency pages.
 import json
 import logging
 import sqlite3
+from typing import Tuple
 
 from db_config import DB_PATH
 
@@ -299,7 +300,7 @@ PROTOCOLS = [
 ]
 
 
-def seed_emergency_protocols() -> tuple[int, int]:
+def seed_emergency_protocols() -> Tuple[int, int]:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
 
@@ -319,7 +320,7 @@ def seed_emergency_protocols() -> tuple[int, int]:
                     item.get("category"),
                     item.get("indication"),
                     item.get("steps"),
-                    item.get("drugs"),
+                    item.get("medications", item.get("drugs")),
                     item.get("drugs"),
                     item.get("doses"),
                     item.get("notes"),
@@ -340,7 +341,7 @@ def seed_emergency_protocols() -> tuple[int, int]:
                     item.get("category"),
                     item.get("indication"),
                     item.get("steps"),
-                    item.get("drugs"),
+                    item.get("medications", item.get("drugs")),
                     item.get("drugs"),
                     item.get("doses"),
                     item.get("notes"),
